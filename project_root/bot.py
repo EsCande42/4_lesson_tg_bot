@@ -1,5 +1,5 @@
 from telegram import Update
-from telegram.ext import Application, ContextTypes, PicklePersistence
+from telegram.ext import Application, ContextTypes
 from dotenv import load_dotenv
 import os
 import logging
@@ -12,6 +12,7 @@ import asyncio
 from utils.logging_config import setup_logging, log_function_call, DEBUG_MODE
 import json
 from pathlib import Path
+from utils.custom_persistence import sqlalchemy_persistence
 
 # Set up logging directory
 LOGS_DIR = os.path.join(os.path.dirname(__file__), 'logs')
@@ -25,8 +26,6 @@ class TelegramBot:
         try:
             # Create logs directory if it doesn't exist
             os.makedirs(LOGS_DIR, exist_ok=True)
-            # Create data directory for persistence
-            os.makedirs('data', exist_ok=True)
         except Exception as e:
             logger.warning(f"Could not create directories: {e}")
         
@@ -35,11 +34,8 @@ class TelegramBot:
         if not self.token:
             raise ValueError("TELEGRAM_TOKEN not found in environment variables")
         
-        # Initialize persistence and job queue
-        persistence = PicklePersistence(
-            filepath="data/conversation_data",
-            update_interval=30
-        )
+        # Use SQLAlchemy-based persistence
+        persistence = sqlalchemy_persistence
             
         self.application = (
             Application.builder()
@@ -56,7 +52,7 @@ class TelegramBot:
         self.history_handler = HistoryHandler()
         self.settings_handler = SettingsHandler()
         self.image_settings_handler = ImageSettingsHandler()
-        self.chat_handler = ChatHandler(history_handler=self.history_handler)
+        self.chat_handler = ChatHandler()
         
         self._running = False
         self._offset = None
@@ -111,63 +107,54 @@ class TelegramBot:
             "/help - Помощь"
         )
 
+    def _is_message_for_bot(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+        """Check if a message in a group is directed at the bot."""
+        if update.effective_chat.type == "private":
+            return True
+
+        message_text = update.message.text or ""
+        bot_username = f"@{context.bot.username}"
+
+        if message_text.startswith(bot_username):
+            return True
+
+        if update.message.reply_to_message and update.message.reply_to_message.from_user.is_bot:
+            return True
+
+        if update.message.entities:
+            for entity in update.message.entities:
+                if entity.type == "mention":
+                    mention = message_text[entity.offset:entity.offset + entity.length]
+                    if mention == bot_username:
+                        return True
+        return False
+
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle incoming messages"""
-        # Check if message exists
-        if not update.message or not update.message.text:
+        """Handle incoming messages by routing them to the appropriate handler."""
+        if not self._is_message_for_bot(update, context):
             return
 
-        # Get bot's username
-        bot_username = context.bot.username
-        message_text = update.message.text
+        user_id = update.effective_user.id
+        message_text = update.message.text or ""
 
-        # Check if message is meant for bot (direct message or mention in group)
-        if update.effective_chat.type not in ["private", "channel"]:
-            # Check if message mentions the bot
-            is_for_bot = False
-            
-            # Check for direct mention at start
-            if message_text.startswith(f"@{bot_username}"):
-                is_for_bot = True
-                message_text = message_text.replace(f"@{bot_username}", "", 1).strip()
-            
-            # Check for mentions in entities
-            elif update.message.entities:
-                for entity in update.message.entities:
-                    if entity.type == "mention":
-                        mention = message_text[entity.offset:entity.offset + entity.length]
-                        if mention == f"@{bot_username}":
-                            is_for_bot = True
-                            message_text = message_text.replace(mention, "").strip()
-                            break
-            
-            # If message is not for this bot, ignore it
-            if not is_for_bot:
-                return
+        # Clean the message text if the bot was mentioned
+        if update.effective_chat.type != "private":
+            message_text = message_text.replace(f"@{context.bot.username}", "").strip()
 
-        # Save message to history
-        await self.history_handler.save_message(
-            update.effective_user.id,
-            message_text or "(изображение)"
-        )
+        # Save user message to history
+        await self.history_handler.save_message(user_id, message_text or "(изображение)")
         
-        # Handle image generation if message starts with /image
-        if message_text and message_text.startswith('/image '):
-            prompt = message_text[7:].strip()  # Remove '/image ' prefix
+        # Route to the correct handler
+        if message_text.startswith('/image '):
+            prompt = message_text[7:].strip()
             if prompt:
                 context.user_data['image_prompt'] = prompt
                 await self.chat_handler.handle_image_generation(update, context)
-                return
-        
-        # Handle regular text messages with streaming response
-        if message_text:
-            # Store the processed text in context instead of modifying the message
-            context.user_data['processed_text'] = message_text
-            await self.chat_handler.stream_openai_response(update, context)
-        
-        # Handle image variations
-        if update.message.photo:
+        elif update.message.photo:
             await self.chat_handler.handle_image_variation(update, context)
+        elif message_text:
+            context.user_data['processed_text'] = message_text
+            await self.chat_handler.stream_ai_response(update, context)
 
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /help command"""
