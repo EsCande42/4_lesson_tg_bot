@@ -1,5 +1,5 @@
-from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, ForeignKey, DateTime
-from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, ForeignKey, DateTime, JSON
+from sqlalchemy.orm import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from datetime import datetime
 import os
@@ -62,6 +62,17 @@ class ImageSettings(Base):
     
     # Relationship
     user = relationship("User", back_populates="image_settings")
+
+class PersistenceData(Base):
+    __tablename__ = 'persistence_data'
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, unique=True, nullable=True)
+    chat_id = Column(Integer, unique=True, nullable=True)
+    bot_data = Column(JSON)
+    user_data = Column(JSON)
+    chat_data = Column(JSON)
+    callback_data = Column(JSON)
 
 # Database initialization
 def init_db():
