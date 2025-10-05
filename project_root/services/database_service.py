@@ -1,7 +1,15 @@
 import asyncio
+import json
 from sqlalchemy.orm import sessionmaker, Session
-from typing import Optional, Dict, Any, List
-from utils.database import User, UserSettings, ImageSettings, Message, init_db
+from sqlalchemy import select, update
+from typing import Optional, Dict, Any, List, Tuple
+from utils.database import User, UserSettings, ImageSettings, Message, PersistenceData, init_db
+from collections import defaultdict
+
+def _str_to_tuple(s: str) -> Tuple[int, ...]:
+    """Converts a string representation of a tuple back to a tuple."""
+    # This handles cases like '(123,)' and '(123, 456)'
+    return tuple(map(int, s.strip('()').split(',')))
 
 class DatabaseService:
     def __init__(self, session_factory: sessionmaker):
@@ -28,34 +36,21 @@ class DatabaseService:
             with self.Session() as session:
                 user = session.query(User).filter_by(telegram_id=user_id).first()
                 if not user:
-                    # This case should ideally be handled by get_or_create_user first
                     raise ValueError("User not found")
-
                 settings = session.query(UserSettings).filter_by(user_id=user.id).first()
                 if not settings:
                     settings = UserSettings(user_id=user.id)
                     session.add(settings)
                     session.commit()
                     session.refresh(settings)
-
-                return {
-                    'base_url': settings.base_url,
-                    'model': settings.model,
-                    'temperature': settings.temperature,
-                    'max_tokens': settings.max_tokens,
-                    'use_assistant': settings.use_assistant,
-                    'assistant_url': settings.assistant_url
-                }
+                return {k: v for k, v in settings.__dict__.items() if not k.startswith('_')}
         return await self._execute_sync(_get_settings)
 
     async def update_user_settings(self, user_id: int, new_settings: Dict[str, Any]):
         def _update():
             with self.Session() as session:
                 user = session.query(User).filter_by(telegram_id=user_id).one()
-                settings = session.query(UserSettings).filter_by(user_id=user.id).one()
-                for key, value in new_settings.items():
-                    if hasattr(settings, key):
-                        setattr(settings, key, value)
+                session.query(UserSettings).filter_by(user_id=user.id).update(new_settings)
                 session.commit()
         await self._execute_sync(_update)
 
@@ -65,32 +60,20 @@ class DatabaseService:
                 user = session.query(User).filter_by(telegram_id=user_id).first()
                 if not user:
                     raise ValueError("User not found")
-
                 settings = session.query(ImageSettings).filter_by(user_id=user.id).first()
                 if not settings:
                     settings = ImageSettings(user_id=user.id)
                     session.add(settings)
                     session.commit()
                     session.refresh(settings)
-
-                return {
-                    'base_url': settings.base_url,
-                    'model': settings.model,
-                    'size': settings.size,
-                    'quality': settings.quality,
-                    'style': settings.style,
-                    'hdr': settings.hdr
-                }
+                return {k: v for k, v in settings.__dict__.items() if not k.startswith('_')}
         return await self._execute_sync(_get_settings)
 
     async def update_image_settings(self, user_id: int, new_settings: Dict[str, Any]):
         def _update():
             with self.Session() as session:
                 user = session.query(User).filter_by(telegram_id=user_id).one()
-                settings = session.query(ImageSettings).filter_by(user_id=user.id).one()
-                for key, value in new_settings.items():
-                    if hasattr(settings, key):
-                        setattr(settings, key, value)
+                session.query(ImageSettings).filter_by(user_id=user.id).update(new_settings)
                 session.commit()
         await self._execute_sync(_update)
 
@@ -103,22 +86,12 @@ class DatabaseService:
                 session.commit()
         await self._execute_sync(_add_message)
 
-    async def get_message_history(self, user_id: int, limit: int = 10) -> List[Dict[str, str]]:
+    async def get_message_history(self, user_id: int, limit: int = 10) -> List[Dict[str, Any]]:
         def _get_history():
             with self.Session() as session:
                 user = session.query(User).filter_by(telegram_id=user_id).one()
-                messages = (
-                    session.query(Message)
-                    .filter_by(user_id=user.id)
-                    .order_by(Message.timestamp.desc())
-                    .limit(limit)
-                    .all()
-                )
-                # Return in chronological order
-                return [
-                    {"role": m.role, "content": m.content, "timestamp": m.timestamp}
-                    for m in reversed(messages)
-                ]
+                messages = session.query(Message).filter_by(user_id=user.id).order_by(Message.timestamp.desc()).limit(limit).all()
+                return [{"role": m.role, "content": m.content, "timestamp": m.timestamp} for m in reversed(messages)]
         return await self._execute_sync(_get_history)
 
     async def clear_message_history(self, user_id: int):
@@ -132,58 +105,53 @@ class DatabaseService:
     async def get_persistence_data(self) -> Dict[str, Any]:
         def _get_data():
             with self.Session() as session:
+                stmt = select(PersistenceData)
+                records = session.execute(stmt).scalars().all()
+
                 data = {
                     "user_data": defaultdict(dict),
                     "chat_data": defaultdict(dict),
                     "bot_data": {},
-                    "conversations": defaultdict(dict)
+                    "conversations": defaultdict(dict),
                 }
 
-                all_persistence = session.query(PersistenceData).all()
-                for record in all_persistence:
-                    if record.user_id:
-                        data["user_data"][record.user_id] = record.user_data or {}
-                    if record.chat_id:
-                        data["chat_data"][record.chat_id] = record.chat_data or {}
-                    if record.bot_data: # Assuming one row for bot_data
-                        data["bot_data"] = record.bot_data or {}
-
+                for record in records:
+                    if record.data_type == "user":
+                        data["user_data"][int(record.data_key)] = record.data
+                    elif record.data_type == "chat":
+                        data["chat_data"][int(record.data_key)] = record.data
+                    elif record.data_type == "bot":
+                        data["bot_data"] = record.data
+                    elif record.data_type == "conversation":
+                        # Keys are conversation names, values are dicts of {tuple_key: state}
+                        conv_name = record.data_key
+                        conv_data = {_str_to_tuple(k): v for k, v in record.data.items()}
+                        data["conversations"][conv_name] = conv_data
                 return data
-
         return await self._execute_sync(_get_data)
 
     async def update_persistence_data(self, data: Dict[str, Any]):
         def _update_data():
             with self.Session() as session:
-                # Update user_data
-                for user_id, user_data in data.get("user_data", {}).items():
-                    record = session.query(PersistenceData).filter_by(user_id=user_id).first()
-                    if not record:
-                        record = PersistenceData(user_id=user_id)
-                        session.add(record)
-                    record.user_data = user_data
-
-                # Update chat_data
-                for chat_id, chat_data in data.get("chat_data", {}).items():
-                    record = session.query(PersistenceData).filter_by(chat_id=chat_id).first()
-                    if not record:
-                        record = PersistenceData(chat_id=chat_id)
-                        session.add(record)
-                    record.chat_data = chat_data
-
-                # Update bot_data (assuming a single record, e.g., with a null user/chat id)
+                # User Data
+                for key, value in data.get("user_data", {}).items():
+                    session.merge(PersistenceData(data_type="user", data_key=str(key), data=value))
+                # Chat Data
+                for key, value in data.get("chat_data", {}).items():
+                    session.merge(PersistenceData(data_type="chat", data_key=str(key), data=value))
+                # Bot Data
                 bot_data = data.get("bot_data")
                 if bot_data:
-                    record = session.query(PersistenceData).filter_by(user_id=None, chat_id=None).first()
-                    if not record:
-                        record = PersistenceData()
-                        session.add(record)
-                    record.bot_data = bot_data
+                     session.merge(PersistenceData(data_type="bot", data_key="bot", data=bot_data))
+                # Conversations
+                conversations = data.get("conversations", {})
+                for conv_name, conv_data in conversations.items():
+                    # Convert tuple keys to strings for JSON
+                    serializable_data = {str(k): v for k, v in conv_data.items()}
+                    session.merge(PersistenceData(data_type="conversation", data_key=conv_name, data=serializable_data))
 
                 session.commit()
-
-        await self._execute_sync(_update_data)
-
+        return await self._execute_sync(_update_data)
 
 # Singleton instance
 db_session_factory = init_db()

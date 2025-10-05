@@ -32,6 +32,7 @@ class SettingsHandler:
             "gpt-4": "GPT-4",
             "gpt-4-turbo": "GPT-4 Turbo",
             "gpt-4o-mini": "GPT-4o-mini",
+            "nano-banana": "Nano Banana (Gemini)",
         }
 
     async def settings_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:

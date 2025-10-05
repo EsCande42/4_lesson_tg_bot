@@ -52,7 +52,7 @@ class TelegramBot:
         self.history_handler = HistoryHandler()
         self.settings_handler = SettingsHandler()
         self.image_settings_handler = ImageSettingsHandler()
-        self.chat_handler = ChatHandler() # No longer needs history_handler
+        self.chat_handler = ChatHandler()
         
         self._running = False
         self._offset = None
@@ -154,7 +154,7 @@ class TelegramBot:
             await self.chat_handler.handle_image_variation(update, context)
         elif message_text:
             context.user_data['processed_text'] = message_text
-            await self.chat_handler.stream_openai_response(update, context)
+            await self.chat_handler.stream_ai_response(update, context)
 
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /help command"""

@@ -63,16 +63,16 @@ class ImageSettings(Base):
     # Relationship
     user = relationship("User", back_populates="image_settings")
 
+from sqlalchemy import UniqueConstraint
+
 class PersistenceData(Base):
     __tablename__ = 'persistence_data'
-
     id = Column(Integer, primary_key=True)
-    user_id = Column(Integer, unique=True, nullable=True)
-    chat_id = Column(Integer, unique=True, nullable=True)
-    bot_data = Column(JSON)
-    user_data = Column(JSON)
-    chat_data = Column(JSON)
-    callback_data = Column(JSON)
+    data_type = Column(String, index=True, nullable=False)
+    data_key = Column(String, index=True, nullable=False)
+    data = Column(JSON, nullable=False)
+
+    __table_args__ = (UniqueConstraint('data_type', 'data_key', name='_data_type_key_uc'),)
 
 # Database initialization
 def init_db():
